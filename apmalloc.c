@@ -35,26 +35,43 @@ static inline unsigned int round_to_next_page(unsigned int n) {
     return (n+x)&~x;
 }
 
-static void insert_free_block(header_t *block) {
-    unsigned int index = bin_index(block->size);
-    header_t *previous = NULL, *current = free_list[index];
+void apfree(void *ptr) {
+    if (ptr == NULL) return;
 
-    while (current != NULL && current < block) {
-        previous = current;
-        current = current->next;
-    }
+    header_t *header = (header_t*)ptr - 1;
 
-    if (previous) {
-        previous->next = block;
-        block->prev = previous;
+    // if it's bigger than our last bin's capacity, we used mmap
+    if (header->size >= (1 << MAX_BINS)) {
+        munmap(header, header->size);
     } else {
-        free_list[index] = block;
+        unsigned int index = bin_index(header->size);
+        header_t *previous = NULL, *current = free_list[index];
+
+        while (current != NULL && current < header) {
+            previous = current;
+            current = current->next;
+        }
+
+        if (previous) previous->next = header;
+        else free_list[index] = header;
+        header->prev = previous;
+
+        if (current) current->prev = header;
+        header->next = current;
+
+        // coalesce
+        if ((char*)header + header->size == (char*)current) {
+            header->size += current->size;
+            header->next = current->next;
+            if (current->next) current->next->prev = header;
+        }
+
+        if (previous && ((char*)previous + previous->size == (char*)header)) {
+            previous->size += header->size;
+            previous->next = header->next;
+            if (header->next) header->next->prev = previous;
+        }
     }
-
-    if (current) current->prev = block;
-    block->next = current;
-
-    // TODO: coalesce here
 }
 
 void *apmalloc(size_t size) {
@@ -90,7 +107,7 @@ void *apmalloc(size_t size) {
                 if (candidate->size > request_size) {
                     header_t *remainder = (header_t*)((char*)candidate + request_size);
                     remainder->size = candidate->size - request_size;
-                    insert_free_block(remainder);
+                    apfree(remainder + 1);
 
                     candidate->size = request_size;
                 }
@@ -108,67 +125,9 @@ void *apmalloc(size_t size) {
 
     header_t *remainder = (header_t*)((char*)ptr + request_size);
     remainder->size = PAGE_SIZE - request_size;
-    insert_free_block(remainder);
+    apfree(remainder + 1);
 
     header_t *header = (header_t*)ptr;
     header->size = request_size;
     return (void*)(header + 1);
-}
-
-void apfree(void *ptr) {
-    if (ptr == NULL) return;
-
-    header_t *header = (header_t*)ptr - 1;
-
-    // if it's bigger than our last bin's capacity, we used mmap
-    if (header->size >= (1 << MAX_BINS)) munmap(header, header->size);
-    // otherwise just insert it into our free lists
-    else insert_free_block(header);
-}
-
-
-
-
-
-
-
-
-void print_list() {
-    for (int i = 0; i < MAX_BINS; i++) {
-        printf("List %d:", i);
-        if (free_list[i] == NULL) printf("<empty>");
-        else {
-            header_t *h = free_list[i];
-            while (h != NULL) {
-                printf("%x (%d) ; ", h, h->size);
-                h = h->next;
-            }
-        }
-        printf("\n");
-    }
-}
-
-
-#include <stdio.h>
-
-int main() {
-    printf("Start:\n");
-    print_list();
-    printf("--------------------------------------------------\n");
-    printf("Malloc 80 blocks\n");
-    int* blah = apmalloc(56);
-    print_list();
-    printf("--------------------------------------------------\n");
-    printf("Free 80 blocks\n");
-    apfree(blah);
-    print_list();
-    printf("--------------------------------------------------\n");
-    printf("Malloc 40 bytes\n");
-    int* blah2 = apmalloc(10);
-    print_list();
-    printf("--------------------------------------------------\n");
-    printf("Free 40 bytes\n");
-    apfree(blah2);
-    print_list();
-    printf("--------------------------------------------------\n");
 }
